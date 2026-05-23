@@ -4,6 +4,8 @@ import type { AnalysisResult, ChordSegment, MidiNote } from "./types";
 
 const API_ENDPOINT = "/api/analyze";
 const MAX_SCHEDULED_NOTES = 4200;
+const DEFAULT_PIANO_VOLUME = 0.85;
+const PIANO_NOTE_GAIN = 2.2;
 const PIANO_INSTRUMENT = "acoustic_grand_piano";
 const PIANO_SOUNDFONT_URL = "/soundfonts/acoustic_grand_piano-mp3.js";
 const SOUNDFONT_NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
@@ -158,11 +160,11 @@ function AnalysisView({ result }: { result: AnalysisResult }) {
 function AudioPlayer({ result }: { result: AnalysisResult }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
-  const [volume, setVolume] = useState(0.36);
+  const [volume, setVolume] = useState(DEFAULT_PIANO_VOLUME);
   const [playerMessage, setPlayerMessage] = useState("Piano SoundFont ready");
   const [playerError, setPlayerError] = useState<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const activeNodesRef = useRef<Array<AudioScheduledSourceNode | GainNode>>([]);
+  const activeNodesRef = useRef<Array<AudioScheduledSourceNode | AudioNode>>([]);
   const animationFrameRef = useRef<number | null>(null);
   const masterGainRef = useRef<GainNode | null>(null);
   const sampleCacheRef = useRef<Map<number, DecodedPianoSample>>(new Map());
@@ -239,9 +241,7 @@ function AudioPlayer({ result }: { result: AnalysisResult }) {
       setPlayerMessage("ピアノサンプルを準備中...");
       await loadRequiredPianoSamples(context, soundfont, playableNotes, sampleCacheRef.current);
 
-      const masterGain = context.createGain();
-      masterGain.gain.setValueAtTime(volume, context.currentTime);
-      masterGain.connect(context.destination);
+      const masterGain = createPianoOutputChain(context, volume);
       masterGainRef.current = masterGain;
       activeNodesRef.current.push(masterGain);
 
@@ -278,6 +278,46 @@ function AudioPlayer({ result }: { result: AnalysisResult }) {
     }
   };
 
+  const playTestNote = async () => {
+    stopPlayback();
+    setPlayerError(null);
+    try {
+      setPlayerMessage("テスト音を準備中...");
+      const context = getAudioContext();
+      await context.resume();
+      const soundfont = await loadPianoSoundfont();
+      const sample = await loadPianoSample(context, soundfont, 60, sampleCacheRef.current);
+      const masterGain = createPianoOutputChain(context, volume);
+      masterGainRef.current = masterGain;
+      activeNodesRef.current.push(masterGain);
+      const now = context.currentTime + 0.04;
+      const testNote: MidiNote = {
+        track: 0,
+        channel: 1,
+        pitch: 60,
+        name: "C4",
+        velocity: 118,
+        startTick: 0,
+        endTick: 480,
+        startSeconds: 0,
+        endSeconds: 1.3,
+      };
+      activeNodesRef.current.push(...schedulePianoNote(context, masterGain, testNote, sample, now));
+      setPlayerMessage("Piano SoundFont test tone");
+      window.setTimeout(() => {
+        if (!isPlaying) {
+          stopPlayback();
+          setPlayerMessage("Piano SoundFont ready");
+        }
+      }, 1600);
+    } catch (caught) {
+      stopPlayback();
+      const message = caught instanceof Error ? caught.message : "テスト音の再生に失敗しました。";
+      setPlayerError(message);
+      setPlayerMessage("Piano SoundFont unavailable");
+    }
+  };
+
   const progress = result.durationSeconds > 0 ? position / result.durationSeconds : 0;
 
   return (
@@ -295,12 +335,15 @@ function AudioPlayer({ result }: { result: AnalysisResult }) {
         <button className="ghostButton compactButton" type="button" onClick={stopPlayback} disabled={!isPlaying}>
           停止
         </button>
+        <button className="ghostButton compactButton" type="button" onClick={() => void playTestNote()}>
+          テスト音
+        </button>
         <label className="controlField">
           <span>音量</span>
           <input
             type="range"
             min="0"
-            max="1"
+            max="2"
             step="0.01"
             value={volume}
             onChange={(event) => setVolume(Number(event.target.value))}
@@ -502,7 +545,7 @@ function schedulePianoNote(
   const duration = Math.max(0.04, end - start);
   const source = context.createBufferSource();
   const gain = context.createGain();
-  const noteGain = Math.max(0.01, (note.velocity / 127) * 0.78);
+  const noteGain = Math.max(0.01, (note.velocity / 127) * PIANO_NOTE_GAIN);
   const attack = Math.min(0.015, duration * 0.2);
   const release = Math.min(0.18, duration * 0.45);
 
@@ -518,6 +561,22 @@ function schedulePianoNote(
   source.start(start);
   source.stop(end + release + 0.02);
   return [source, gain];
+}
+
+function createPianoOutputChain(context: AudioContext, volume: number) {
+  const masterGain = context.createGain();
+  const compressor = context.createDynamicsCompressor();
+
+  masterGain.gain.setValueAtTime(volume, context.currentTime);
+  compressor.threshold.setValueAtTime(-18, context.currentTime);
+  compressor.knee.setValueAtTime(22, context.currentTime);
+  compressor.ratio.setValueAtTime(7, context.currentTime);
+  compressor.attack.setValueAtTime(0.004, context.currentTime);
+  compressor.release.setValueAtTime(0.18, context.currentTime);
+
+  masterGain.connect(compressor);
+  compressor.connect(context.destination);
+  return masterGain;
 }
 
 function loadPianoSoundfont(): Promise<SoundfontMap> {

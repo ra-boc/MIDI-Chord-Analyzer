@@ -230,7 +230,7 @@ h2 {
 
 .playerControls {
   display: grid;
-  grid-template-columns: auto auto minmax(180px, 1fr) minmax(150px, 190px);
+  grid-template-columns: auto auto auto minmax(180px, 1fr) minmax(150px, 190px);
   align-items: end;
   gap: 12px;
 }
