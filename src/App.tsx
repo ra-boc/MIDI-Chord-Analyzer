@@ -1,8 +1,15 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent } from "react";
 import type { AnalysisResult, ChordSegment, MidiNote } from "./types";
 
 const API_ENDPOINT = "/api/analyze";
+const MAX_SCHEDULED_NOTES = 4200;
+type SynthWaveform = OscillatorType;
+
+type WebAudioWindow = Window &
+  typeof globalThis & {
+    webkitAudioContext?: typeof AudioContext;
+  };
 
 function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -106,11 +113,154 @@ function AnalysisView({ result }: { result: AnalysisResult }) {
   return (
     <div className="analysisStack">
       <Summary result={result} />
+      <AudioPlayer result={result} />
       <Progression result={result} />
       <ChordTimeline chords={result.chords} />
       <PianoRoll notes={result.notes} chords={result.chords} durationTicks={result.durationTicks} />
       <TrackTable result={result} />
     </div>
+  );
+}
+
+function AudioPlayer({ result }: { result: AnalysisResult }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [position, setPosition] = useState(0);
+  const [volume, setVolume] = useState(0.28);
+  const [waveform, setWaveform] = useState<SynthWaveform>("triangle");
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const activeNodesRef = useRef<Array<AudioScheduledSourceNode | GainNode>>([]);
+  const animationFrameRef = useRef<number | null>(null);
+  const startTimeRef = useRef(0);
+
+  const playableNotes = useMemo(
+    () =>
+      result.notes
+        .filter((note) => note.endSeconds > note.startSeconds)
+        .slice(0, MAX_SCHEDULED_NOTES),
+    [result.notes],
+  );
+  const skippedNotes = Math.max(0, result.notes.length - playableNotes.length);
+
+  useEffect(() => {
+    return () => {
+      stopPlayback();
+    };
+  }, []);
+
+  useEffect(() => {
+    stopPlayback();
+    setPosition(0);
+  }, [result.fileName]);
+
+  const stopPlayback = () => {
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    for (const node of activeNodesRef.current) {
+      try {
+        if ("stop" in node) {
+          node.stop(0);
+        } else {
+          node.disconnect();
+        }
+      } catch {
+        // Already stopped or disconnected.
+      }
+    }
+    activeNodesRef.current = [];
+    setIsPlaying(false);
+  };
+
+  const getAudioContext = () => {
+    if (audioContextRef.current) {
+      return audioContextRef.current;
+    }
+    const AudioContextClass = window.AudioContext ?? (window as WebAudioWindow).webkitAudioContext;
+    if (!AudioContextClass) {
+      throw new Error("このブラウザはWeb Audio APIに対応していません。");
+    }
+    audioContextRef.current = new AudioContextClass();
+    return audioContextRef.current;
+  };
+
+  const play = async () => {
+    stopPlayback();
+    const context = getAudioContext();
+    await context.resume();
+
+    const masterGain = context.createGain();
+    masterGain.gain.setValueAtTime(volume, context.currentTime);
+    masterGain.connect(context.destination);
+    activeNodesRef.current.push(masterGain);
+
+    const scheduledStart = context.currentTime + 0.06;
+    startTimeRef.current = scheduledStart;
+    setPosition(0);
+    setIsPlaying(true);
+
+    for (const note of playableNotes) {
+      activeNodesRef.current.push(...scheduleNote(context, masterGain, note, scheduledStart, waveform));
+    }
+
+    const updatePosition = () => {
+      const elapsed = Math.max(0, context.currentTime - startTimeRef.current);
+      setPosition(Math.min(result.durationSeconds, elapsed));
+      if (elapsed >= result.durationSeconds + 0.12) {
+        stopPlayback();
+        setPosition(result.durationSeconds);
+        return;
+      }
+      animationFrameRef.current = window.requestAnimationFrame(updatePosition);
+    };
+    animationFrameRef.current = window.requestAnimationFrame(updatePosition);
+  };
+
+  const progress = result.durationSeconds > 0 ? position / result.durationSeconds : 0;
+
+  return (
+    <section className="sectionBlock playerBlock">
+      <div className="sectionHeader">
+        <h2>再生</h2>
+        <span>
+          {formatTime(position)} / {formatTime(result.durationSeconds)}
+        </span>
+      </div>
+      <div className="playerControls">
+        <button className="primaryButton" type="button" onClick={() => void play()} disabled={!playableNotes.length}>
+          {isPlaying ? "最初から再生" : "再生"}
+        </button>
+        <button className="ghostButton compactButton" type="button" onClick={stopPlayback} disabled={!isPlaying}>
+          停止
+        </button>
+        <label className="controlField">
+          <span>音量</span>
+          <input
+            type="range"
+            min="0"
+            max="0.8"
+            step="0.01"
+            value={volume}
+            onChange={(event) => setVolume(Number(event.target.value))}
+          />
+        </label>
+        <label className="controlField">
+          <span>波形</span>
+          <select value={waveform} onChange={(event) => setWaveform(event.target.value as SynthWaveform)}>
+            <option value="triangle">triangle</option>
+            <option value="sine">sine</option>
+            <option value="square">square</option>
+            <option value="sawtooth">sawtooth</option>
+          </select>
+        </label>
+      </div>
+      <div className="playbackRail" aria-label="再生位置">
+        <span style={{ width: `${Math.min(100, Math.max(0, progress * 100))}%` }} />
+      </div>
+      <p className="playerNote">
+        ブラウザ内蔵シンセで鳴らします。{skippedNotes > 0 && `${skippedNotes.toLocaleString()} notes skipped for this MVP.`}
+      </p>
+    </section>
   );
 }
 
@@ -276,6 +426,47 @@ function TrackTable({ result }: { result: AnalysisResult }) {
 
 function percent(value: number) {
   return `${Math.round(value * 100)}%`;
+}
+
+function scheduleNote(
+  context: AudioContext,
+  output: AudioNode,
+  note: MidiNote,
+  playbackStart: number,
+  waveform: SynthWaveform,
+): [OscillatorNode, GainNode] {
+  const start = playbackStart + note.startSeconds;
+  const end = playbackStart + note.endSeconds;
+  const duration = Math.max(0.04, end - start);
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  const noteGain = Math.max(0.01, (note.velocity / 127) * 0.13);
+  const attack = Math.min(0.015, duration * 0.2);
+  const release = Math.min(0.08, duration * 0.35);
+
+  oscillator.type = waveform;
+  oscillator.frequency.setValueAtTime(midiToFrequency(note.pitch), start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.linearRampToValueAtTime(noteGain, start + attack);
+  gain.gain.setValueAtTime(noteGain * 0.72, Math.max(start + attack, end - release));
+  gain.gain.linearRampToValueAtTime(0.0001, end + release);
+
+  oscillator.connect(gain);
+  gain.connect(output);
+  oscillator.start(start);
+  oscillator.stop(end + release + 0.01);
+  return [oscillator, gain];
+}
+
+function midiToFrequency(pitch: number) {
+  return 440 * 2 ** ((pitch - 69) / 12);
+}
+
+function formatTime(seconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = String(safeSeconds % 60).padStart(2, "0");
+  return `${minutes}:${remainder}`;
 }
 
 export default App;

@@ -18,7 +18,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -78,6 +79,32 @@ h2 {
 
 .ghostButton:hover {
   border-color: #006d77;
+}
+
+.primaryButton {
+  min-height: 42px;
+  border: 1px solid #006d77;
+  border-radius: 8px;
+  background: #006d77;
+  color: #ffffff;
+  padding: 0 18px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.primaryButton:hover {
+  background: #005d66;
+}
+
+.primaryButton:disabled,
+.ghostButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.compactButton {
+  min-width: 84px;
 }
 
 .uploadBand {
@@ -194,6 +221,63 @@ h2 {
 
 .sectionBlock {
   padding: 16px;
+}
+
+.playerBlock {
+  display: grid;
+  gap: 14px;
+}
+
+.playerControls {
+  display: grid;
+  grid-template-columns: auto auto minmax(180px, 1fr) minmax(150px, 190px);
+  align-items: end;
+  gap: 12px;
+}
+
+.controlField {
+  display: grid;
+  gap: 6px;
+  color: #66737d;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.controlField input,
+.controlField select {
+  width: 100%;
+}
+
+.controlField select {
+  min-height: 42px;
+  border: 1px solid #b7c2ca;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #202124;
+  padding: 0 10px;
+}
+
+.controlField input[type="range"] {
+  accent-color: #ef476f;
+}
+
+.playbackRail {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eef2;
+}
+
+.playbackRail span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #006d77, #ef476f);
+}
+
+.playerNote {
+  color: #66737d;
+  font-size: 0.84rem;
 }
 
 .sectionHeader {
@@ -376,5 +460,13 @@ h2 {
     align-items: start;
     gap: 4px;
     padding: 8px 0;
+  }
+
+  .playerControls {
+    grid-template-columns: 1fr;
+  }
+
+  .compactButton {
+    width: 100%;
   }
 }
