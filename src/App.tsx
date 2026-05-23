@@ -4,12 +4,45 @@ import type { AnalysisResult, ChordSegment, MidiNote } from "./types";
 
 const API_ENDPOINT = "/api/analyze";
 const MAX_SCHEDULED_NOTES = 4200;
-type SynthWaveform = OscillatorType;
+const PIANO_INSTRUMENT = "acoustic_grand_piano";
+const PIANO_SOUNDFONT_URL = "/soundfonts/acoustic_grand_piano-mp3.js";
+const SOUNDFONT_NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+const NOTE_NAME_TO_PITCH_CLASS: Record<string, number> = {
+  C: 0,
+  "C#": 1,
+  Db: 1,
+  D: 2,
+  "D#": 3,
+  Eb: 3,
+  E: 4,
+  F: 5,
+  "F#": 6,
+  Gb: 6,
+  G: 7,
+  "G#": 8,
+  Ab: 8,
+  A: 9,
+  "A#": 10,
+  Bb: 10,
+  B: 11,
+};
 
 type WebAudioWindow = Window &
   typeof globalThis & {
     webkitAudioContext?: typeof AudioContext;
+    MIDI?: {
+      Soundfont?: Record<string, SoundfontMap>;
+    };
   };
+
+type SoundfontMap = Record<string, string>;
+
+type DecodedPianoSample = {
+  buffer: AudioBuffer;
+  sourcePitch: number;
+};
+
+let pianoSoundfontPromise: Promise<SoundfontMap> | null = null;
 
 function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -125,11 +158,14 @@ function AnalysisView({ result }: { result: AnalysisResult }) {
 function AudioPlayer({ result }: { result: AnalysisResult }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
-  const [volume, setVolume] = useState(0.28);
-  const [waveform, setWaveform] = useState<SynthWaveform>("triangle");
+  const [volume, setVolume] = useState(0.36);
+  const [playerMessage, setPlayerMessage] = useState("Piano SoundFont ready");
+  const [playerError, setPlayerError] = useState<string | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const activeNodesRef = useRef<Array<AudioScheduledSourceNode | GainNode>>([]);
   const animationFrameRef = useRef<number | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
+  const sampleCacheRef = useRef<Map<number, DecodedPianoSample>>(new Map());
   const startTimeRef = useRef(0);
 
   const playableNotes = useMemo(
@@ -152,6 +188,12 @@ function AudioPlayer({ result }: { result: AnalysisResult }) {
     setPosition(0);
   }, [result.fileName]);
 
+  useEffect(() => {
+    if (masterGainRef.current && audioContextRef.current) {
+      masterGainRef.current.gain.setTargetAtTime(volume, audioContextRef.current.currentTime, 0.01);
+    }
+  }, [volume]);
+
   const stopPlayback = () => {
     if (animationFrameRef.current !== null) {
       window.cancelAnimationFrame(animationFrameRef.current);
@@ -169,6 +211,7 @@ function AudioPlayer({ result }: { result: AnalysisResult }) {
       }
     }
     activeNodesRef.current = [];
+    masterGainRef.current = null;
     setIsPlaying(false);
   };
 
@@ -186,34 +229,53 @@ function AudioPlayer({ result }: { result: AnalysisResult }) {
 
   const play = async () => {
     stopPlayback();
-    const context = getAudioContext();
-    await context.resume();
+    setPlayerError(null);
+    setPlayerMessage("ピアノSoundFontを読み込み中...");
 
-    const masterGain = context.createGain();
-    masterGain.gain.setValueAtTime(volume, context.currentTime);
-    masterGain.connect(context.destination);
-    activeNodesRef.current.push(masterGain);
+    try {
+      const context = getAudioContext();
+      await context.resume();
+      const soundfont = await loadPianoSoundfont();
+      setPlayerMessage("ピアノサンプルを準備中...");
+      await loadRequiredPianoSamples(context, soundfont, playableNotes, sampleCacheRef.current);
 
-    const scheduledStart = context.currentTime + 0.06;
-    startTimeRef.current = scheduledStart;
-    setPosition(0);
-    setIsPlaying(true);
+      const masterGain = context.createGain();
+      masterGain.gain.setValueAtTime(volume, context.currentTime);
+      masterGain.connect(context.destination);
+      masterGainRef.current = masterGain;
+      activeNodesRef.current.push(masterGain);
 
-    for (const note of playableNotes) {
-      activeNodesRef.current.push(...scheduleNote(context, masterGain, note, scheduledStart, waveform));
-    }
+      const scheduledStart = context.currentTime + 0.06;
+      startTimeRef.current = scheduledStart;
+      setPosition(0);
+      setIsPlaying(true);
+      setPlayerMessage("Piano SoundFont playing");
 
-    const updatePosition = () => {
-      const elapsed = Math.max(0, context.currentTime - startTimeRef.current);
-      setPosition(Math.min(result.durationSeconds, elapsed));
-      if (elapsed >= result.durationSeconds + 0.12) {
-        stopPlayback();
-        setPosition(result.durationSeconds);
-        return;
+      for (const note of playableNotes) {
+        const sample = sampleCacheRef.current.get(note.pitch);
+        if (sample) {
+          activeNodesRef.current.push(...schedulePianoNote(context, masterGain, note, sample, scheduledStart));
+        }
       }
+
+      const updatePosition = () => {
+        const elapsed = Math.max(0, context.currentTime - startTimeRef.current);
+        setPosition(Math.min(result.durationSeconds, elapsed));
+        if (elapsed >= result.durationSeconds + 0.12) {
+          stopPlayback();
+          setPosition(result.durationSeconds);
+          setPlayerMessage("Piano SoundFont ready");
+          return;
+        }
+        animationFrameRef.current = window.requestAnimationFrame(updatePosition);
+      };
       animationFrameRef.current = window.requestAnimationFrame(updatePosition);
-    };
-    animationFrameRef.current = window.requestAnimationFrame(updatePosition);
+    } catch (caught) {
+      stopPlayback();
+      const message = caught instanceof Error ? caught.message : "ピアノSoundFontの読み込みに失敗しました。";
+      setPlayerError(message);
+      setPlayerMessage("Piano SoundFont unavailable");
+    }
   };
 
   const progress = result.durationSeconds > 0 ? position / result.durationSeconds : 0;
@@ -238,28 +300,28 @@ function AudioPlayer({ result }: { result: AnalysisResult }) {
           <input
             type="range"
             min="0"
-            max="0.8"
+            max="1"
             step="0.01"
             value={volume}
             onChange={(event) => setVolume(Number(event.target.value))}
           />
         </label>
-        <label className="controlField">
-          <span>波形</span>
-          <select value={waveform} onChange={(event) => setWaveform(event.target.value as SynthWaveform)}>
-            <option value="triangle">triangle</option>
-            <option value="sine">sine</option>
-            <option value="square">square</option>
-            <option value="sawtooth">sawtooth</option>
-          </select>
-        </label>
+        <div className="soundfontBadge">
+          <span>音源</span>
+          <strong>Acoustic Grand Piano</strong>
+        </div>
       </div>
       <div className="playbackRail" aria-label="再生位置">
         <span style={{ width: `${Math.min(100, Math.max(0, progress * 100))}%` }} />
       </div>
-      <p className="playerNote">
-        ブラウザ内蔵シンセで鳴らします。{skippedNotes > 0 && `${skippedNotes.toLocaleString()} notes skipped for this MVP.`}
-      </p>
+      {playerError ? (
+        <p className="errorText">{playerError}</p>
+      ) : (
+        <p className="playerNote">
+          {playerMessage}
+          {skippedNotes > 0 && ` / ${skippedNotes.toLocaleString()} notes skipped for this MVP.`}
+        </p>
+      )}
     </section>
   );
 }
@@ -428,38 +490,129 @@ function percent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
-function scheduleNote(
+function schedulePianoNote(
   context: AudioContext,
   output: AudioNode,
   note: MidiNote,
+  sample: DecodedPianoSample,
   playbackStart: number,
-  waveform: SynthWaveform,
-): [OscillatorNode, GainNode] {
+): [AudioBufferSourceNode, GainNode] {
   const start = playbackStart + note.startSeconds;
   const end = playbackStart + note.endSeconds;
   const duration = Math.max(0.04, end - start);
-  const oscillator = context.createOscillator();
+  const source = context.createBufferSource();
   const gain = context.createGain();
-  const noteGain = Math.max(0.01, (note.velocity / 127) * 0.13);
+  const noteGain = Math.max(0.01, (note.velocity / 127) * 0.78);
   const attack = Math.min(0.015, duration * 0.2);
-  const release = Math.min(0.08, duration * 0.35);
+  const release = Math.min(0.18, duration * 0.45);
 
-  oscillator.type = waveform;
-  oscillator.frequency.setValueAtTime(midiToFrequency(note.pitch), start);
+  source.buffer = sample.buffer;
+  source.playbackRate.setValueAtTime(2 ** ((note.pitch - sample.sourcePitch) / 12), start);
   gain.gain.setValueAtTime(0.0001, start);
   gain.gain.linearRampToValueAtTime(noteGain, start + attack);
   gain.gain.setValueAtTime(noteGain * 0.72, Math.max(start + attack, end - release));
   gain.gain.linearRampToValueAtTime(0.0001, end + release);
 
-  oscillator.connect(gain);
+  source.connect(gain);
   gain.connect(output);
-  oscillator.start(start);
-  oscillator.stop(end + release + 0.01);
-  return [oscillator, gain];
+  source.start(start);
+  source.stop(end + release + 0.02);
+  return [source, gain];
 }
 
-function midiToFrequency(pitch: number) {
-  return 440 * 2 ** ((pitch - 69) / 12);
+function loadPianoSoundfont(): Promise<SoundfontMap> {
+  const soundfontWindow = window as WebAudioWindow;
+  const loadedSoundfont = soundfontWindow.MIDI?.Soundfont?.[PIANO_INSTRUMENT];
+  if (loadedSoundfont) {
+    return Promise.resolve(loadedSoundfont);
+  }
+
+  if (pianoSoundfontPromise) {
+    return pianoSoundfontPromise;
+  }
+
+  pianoSoundfontPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = PIANO_SOUNDFONT_URL;
+    script.async = true;
+    script.onload = () => {
+      const soundfont = (window as WebAudioWindow).MIDI?.Soundfont?.[PIANO_INSTRUMENT];
+      if (soundfont) {
+        resolve(soundfont);
+      } else {
+        reject(new Error("ピアノSoundFontを読み込めませんでした。"));
+      }
+    };
+    script.onerror = () => reject(new Error("ピアノSoundFontのダウンロードに失敗しました。"));
+    document.head.appendChild(script);
+  });
+
+  return pianoSoundfontPromise;
+}
+
+async function loadRequiredPianoSamples(
+  context: AudioContext,
+  soundfont: SoundfontMap,
+  notes: MidiNote[],
+  cache: Map<number, DecodedPianoSample>,
+) {
+  const uniquePitches = Array.from(new Set(notes.map((note) => note.pitch)));
+  await Promise.all(uniquePitches.map((pitch) => loadPianoSample(context, soundfont, pitch, cache)));
+}
+
+async function loadPianoSample(
+  context: AudioContext,
+  soundfont: SoundfontMap,
+  pitch: number,
+  cache: Map<number, DecodedPianoSample>,
+) {
+  const cached = cache.get(pitch);
+  if (cached) {
+    return cached;
+  }
+
+  const { dataUrl, sourcePitch } = findPianoSample(soundfont, pitch);
+  const response = await fetch(dataUrl);
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = await context.decodeAudioData(arrayBuffer.slice(0));
+  const sample = { buffer, sourcePitch };
+  cache.set(pitch, sample);
+  return sample;
+}
+
+function findPianoSample(soundfont: SoundfontMap, pitch: number) {
+  const exactName = midiToSoundfontName(pitch);
+  if (soundfont[exactName]) {
+    return { dataUrl: soundfont[exactName], sourcePitch: pitch };
+  }
+
+  const candidates = Object.keys(soundfont)
+    .map((name) => ({ name, pitch: soundfontNameToMidi(name) }))
+    .filter((candidate): candidate is { name: string; pitch: number } => candidate.pitch !== null);
+  if (!candidates.length) {
+    throw new Error("ピアノSoundFontに使用できるサンプルがありません。");
+  }
+  const closest = candidates.reduce((best, candidate) =>
+    Math.abs(candidate.pitch - pitch) < Math.abs(best.pitch - pitch) ? candidate : best,
+  );
+  return { dataUrl: soundfont[closest.name], sourcePitch: closest.pitch };
+}
+
+function midiToSoundfontName(pitch: number) {
+  const octave = Math.floor(pitch / 12) - 1;
+  return `${SOUNDFONT_NOTE_NAMES[pitch % 12]}${octave}`;
+}
+
+function soundfontNameToMidi(name: string) {
+  const match = /^([A-G](?:b|#)?)(-?\d+)$/.exec(name);
+  if (!match) {
+    return null;
+  }
+  const pitchClass = NOTE_NAME_TO_PITCH_CLASS[match[1]];
+  if (pitchClass === undefined) {
+    return null;
+  }
+  return (Number(match[2]) + 1) * 12 + pitchClass;
 }
 
 function formatTime(seconds: number) {

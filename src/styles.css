@@ -261,6 +261,27 @@ h2 {
   accent-color: #ef476f;
 }
 
+.soundfontBadge {
+  display: grid;
+  gap: 6px;
+  min-height: 42px;
+  border: 1px solid #d8e0e6;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 8px 10px;
+}
+
+.soundfontBadge span {
+  color: #66737d;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.soundfontBadge strong {
+  overflow-wrap: anywhere;
+  font-size: 0.88rem;
+}
+
 .playbackRail {
   height: 10px;
   overflow: hidden;

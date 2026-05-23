@@ -48,6 +48,7 @@ samples/pop_progression.mid
 - Estimate key from pitch class distribution
 - Estimate one chord per bar with alternatives and confidence
 - Show chord progression, bar timeline, track list, and a compact piano roll
+- Play the analyzed notes with a browser-loaded acoustic grand piano SoundFont
 
 ## Next Useful Additions
 
@@ -55,4 +56,13 @@ samples/pop_progression.mid
 - User correction and saved analysis projects
 - Roman numeral analysis
 - MusicXML / MIDI chord track export
+- Local SoundFont asset bundling and instrument selection
 - FastAPI replacement once external Python dependencies are available
+
+## SoundFont Source
+
+Piano preview playback bundles `acoustic_grand_piano` from the FluidR3_GM set published by `gleitz/midi-js-soundfonts`:
+
+```text
+https://gleitz.github.io/midi-js-soundfonts/FluidR3_GM/acoustic_grand_piano-mp3.js
+```
